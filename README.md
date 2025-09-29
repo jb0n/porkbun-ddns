@@ -1,6 +1,6 @@
 # Porkbun DDNS Client
 
-A lightweight dynamic DNS client for Porkbun, supporting both IPv4 (A records) and IPv6 (AAAA records) with multi-subdomain configuration.
+A lightweight dynamic DNS client for Porkbun, supporting both IPv4 (A records) and IPv6 (AAAA records) with multi-subdomain configuration. Took a lot of inspiration from https://github.com/luxeon/porkbun-ddns/, but I wanted AAAA and multiple subdomains (and to be able to update the base domain).
 
 ## Features
 
