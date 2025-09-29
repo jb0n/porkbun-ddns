@@ -29,13 +29,13 @@ This will create a `porkbun-ddns` executable in the current directory.
 To create a configuration file interactively:
 
 ```bash
-porkbun-ddns --create
+./porkbun-ddns --create
 ```
 
 Once configured, run the client to update your DNS records:
 
 ```bash
-porkbun-ddns
+./porkbun-ddns
 ```
 
 The client will read your configuration and update the specified DNS records with your current IP addresses.
