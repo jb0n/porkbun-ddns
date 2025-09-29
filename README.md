@@ -32,6 +32,14 @@ To create a configuration file interactively:
 porkbun-ddns --create
 ```
 
+Once configured, run the client to update your DNS records:
+
+```bash
+porkbun-ddns
+```
+
+The client will read your configuration and update the specified DNS records with your current IP addresses.
+
 ## Requirements
 
 - Porkbun API credentials (API key and secret key)
