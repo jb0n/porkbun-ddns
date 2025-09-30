@@ -92,8 +92,6 @@ func promptForConfig() *porkbunddns.Config {
 		APISecret: promptString(reader, "Porkbun API Secret", ""),
 		Domain:    promptString(reader, "Domain", "example.com"),
 		TTL:       promptInt(reader, "TTL (seconds)", "600"),
-		IPv4File:  promptString(reader, "IPv4 cache file", "/tmp/current_ipv4.txt"),
-		IPv6File:  promptString(reader, "IPv6 cache file", "/tmp/current_ipv6.txt"),
 	}
 	config.Subdomains = promptSubdomains(reader, config.Domain)
 	return config

@@ -15,8 +15,6 @@ type Config struct {
 	Domain     string
 	Subdomains []string
 	TTL        int
-	IPv4File   string
-	IPv6File   string
 }
 
 type PorkbunRequest struct {
