@@ -3,11 +3,16 @@ package porkbunddns
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 )
+
+var httpClient = &http.Client{Timeout: 15 * time.Second}
 
 type Config struct {
 	APIKey     string
@@ -20,6 +25,15 @@ type Config struct {
 type PorkbunRequest struct {
 	APIKey       string `json:"apikey"`
 	SecretAPIKey string `json:"secretapikey"`
+	Content      string `json:"content"`
+	TTL          int    `json:"ttl"`
+}
+
+type PorkbunCreateRequest struct {
+	APIKey       string `json:"apikey"`
+	SecretAPIKey string `json:"secretapikey"`
+	Name         string `json:"name"`
+	Type         string `json:"type"`
 	Content      string `json:"content"`
 	TTL          int    `json:"ttl"`
 }
@@ -43,34 +57,51 @@ type RetrieveResponse struct {
 	Records []DNSRecord `json:"records"`
 }
 
+func fetchPublicIP(url string) (string, error) {
+	resp, err := httpClient.Get(url)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response body. err=%w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status from %s: %s", url, resp.Status)
+	}
+
+	ip := strings.TrimSpace(string(body))
+	if net.ParseIP(ip) == nil {
+		return "", fmt.Errorf("invalid IP address from %s: %q", url, ip)
+	}
+	return ip, nil
+}
+
 func getCurrentIPv4() (string, error) {
-	resp, err := http.Get("https://api.ipify.org")
+	ip, err := fetchPublicIP("https://api.ipify.org")
 	if err != nil {
 		return "", fmt.Errorf("failed to get current IPv4. err=%w", err)
 	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response body. err=%w", err)
+	if strings.Contains(ip, ":") {
+		return "", fmt.Errorf("expected an IPv4 address from api.ipify.org, got %s", ip)
 	}
-
-	return strings.TrimSpace(string(body)), nil
+	return ip, nil
 }
 
-func getCurrentIPv6() (string, error) {
-	resp, err := http.Get("https://api64.ipify.org")
+// getCurrentIPv6 returns an empty string when the host has no public IPv6
+// connectivity. A dual-stack probe such as api64.ipify.org would return the
+// IPv4 address in that case, which must not be written to an AAAA record.
+func getCurrentIPv6() string {
+	ip, err := fetchPublicIP("https://api6.ipify.org")
 	if err != nil {
-		return "", fmt.Errorf("failed to get current IPv6. err=%w", err)
+		return ""
 	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response body. err=%w", err)
+	if net.ParseIP(ip).To4() != nil {
+		return ""
 	}
-
-	return strings.TrimSpace(string(body)), nil
+	return ip
 }
 
 func retrieveDNSRecords(config Config) ([]DNSRecord, error) {
@@ -89,7 +120,7 @@ func retrieveDNSRecords(config Config) ([]DNSRecord, error) {
 		return nil, fmt.Errorf("failed to marshal request data. err=%w", err)
 	}
 
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
+	resp, err := httpClient.Post(url, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request. err=%w", err)
 	}
@@ -142,7 +173,47 @@ func updatePorkbunDNS(config Config, subdomain, ip, recordType string) error {
 		return fmt.Errorf("failed to marshal request data. err=%w", err)
 	}
 
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
+	resp, err := httpClient.Post(url, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to send request. err=%w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response. err=%w", err)
+	}
+
+	var porkbunResp PorkbunResponse
+	if err := json.Unmarshal(body, &porkbunResp); err != nil {
+		return fmt.Errorf("failed to parse response. err=%w", err)
+	}
+
+	if porkbunResp.Status != "SUCCESS" {
+		return fmt.Errorf("API error. body=%s", string(body))
+	}
+
+	return nil
+}
+
+func createPorkbunDNS(config Config, subdomain, ip, recordType string) error {
+	url := fmt.Sprintf("https://api.porkbun.com/api/json/v3/dns/create/%s", config.Domain)
+
+	reqData := PorkbunCreateRequest{
+		APIKey:       config.APIKey,
+		SecretAPIKey: config.APISecret,
+		Name:         subdomain,
+		Type:         recordType,
+		Content:      ip,
+		TTL:          config.TTL,
+	}
+
+	jsonData, err := json.Marshal(reqData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request data. err=%w", err)
+	}
+
+	resp, err := httpClient.Post(url, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("failed to send request. err=%w", err)
 	}
@@ -171,9 +242,9 @@ func UpdateDDNS(config Config) error {
 	if err != nil {
 		return err
 	}
-	currentIPv6, err := getCurrentIPv6()
-	if err != nil {
-		return err
+	currentIPv6 := getCurrentIPv6()
+	if currentIPv6 == "" {
+		fmt.Println("No public IPv6; skipping AAAA records")
 	}
 
 	// Retrieve existing DNS records from Porkbun API
@@ -182,61 +253,56 @@ func UpdateDDNS(config Config) error {
 		return fmt.Errorf("failed to retrieve DNS records. err=%w", err)
 	}
 
-	// Check if any A or AAAA records need updating (only need to check one of each type)
-	firstSubdomain := config.Subdomains[0]
+	var updateErrs []error
 
-	ipv4NeedsUpdate := false
-	aRecord := findDNSRecord(records, config.Domain, firstSubdomain, "A")
-	if aRecord != nil {
-		if aRecord.Content != currentIPv4 {
-			fmt.Printf("Current IPv4 is %s, DNS has %s (update needed)\n", currentIPv4, aRecord.Content)
-			ipv4NeedsUpdate = true
+	for _, subdomain := range config.Subdomains {
+		displayName := subdomain
+		if displayName == "" {
+			displayName = config.Domain
 		} else {
-			fmt.Printf("IPv4 already up to date: %s\n", currentIPv4)
+			displayName = subdomain + "." + config.Domain
 		}
-	} else {
-		fmt.Printf("A record not found (update needed)\n")
-		ipv4NeedsUpdate = true
-	}
 
-	ipv6NeedsUpdate := false
-	aaaaRecord := findDNSRecord(records, config.Domain, firstSubdomain, "AAAA")
-	if aaaaRecord != nil {
-		if aaaaRecord.Content != currentIPv6 {
-			fmt.Printf("Current IPv6 is %s, DNS has %s (update needed)\n", currentIPv6, aaaaRecord.Content)
-			ipv6NeedsUpdate = true
-		} else {
-			fmt.Printf("IPv6 already up to date: %s\n", currentIPv6)
-		}
-	} else {
-		fmt.Printf("AAAA record not found (update needed)\n")
-		ipv6NeedsUpdate = true
-	}
-
-	// Update DNS records only if needed
-	if ipv4NeedsUpdate || ipv6NeedsUpdate {
-		for _, subdomain := range config.Subdomains {
-			displayName := subdomain
-			if displayName == "" {
-				displayName = config.Domain
+		aRecord := findDNSRecord(records, config.Domain, subdomain, "A")
+		switch {
+		case aRecord == nil:
+			if err := createPorkbunDNS(config, subdomain, currentIPv4, "A"); err != nil {
+				updateErrs = append(updateErrs, fmt.Errorf("error creating IPv4 DDNS for %s. err=%w", displayName, err))
 			} else {
-				displayName = subdomain + "." + config.Domain
+				fmt.Printf("A record created: %s -> %s\n", displayName, currentIPv4)
 			}
-
-			if ipv4NeedsUpdate {
-				if err := updatePorkbunDNS(config, subdomain, currentIPv4, "A"); err != nil {
-					return fmt.Errorf("error updating IPv4 DDNS for %s. err=%w", displayName, err)
-				}
+		case aRecord.Content != currentIPv4:
+			if err := updatePorkbunDNS(config, subdomain, currentIPv4, "A"); err != nil {
+				updateErrs = append(updateErrs, fmt.Errorf("error updating IPv4 DDNS for %s. err=%w", displayName, err))
+			} else {
 				fmt.Printf("A record updated: %s -> %s\n", displayName, currentIPv4)
 			}
+		default:
+			fmt.Printf("A already up to date for %s: %s\n", displayName, currentIPv4)
+		}
 
-			if ipv6NeedsUpdate {
-				if err := updatePorkbunDNS(config, subdomain, currentIPv6, "AAAA"); err != nil {
-					return fmt.Errorf("error updating IPv6 DDNS for %s. err=%w", displayName, err)
-				}
+		if currentIPv6 == "" {
+			continue
+		}
+
+		aaaaRecord := findDNSRecord(records, config.Domain, subdomain, "AAAA")
+		switch {
+		case aaaaRecord == nil:
+			if err := createPorkbunDNS(config, subdomain, currentIPv6, "AAAA"); err != nil {
+				updateErrs = append(updateErrs, fmt.Errorf("error creating IPv6 DDNS for %s. err=%w", displayName, err))
+			} else {
+				fmt.Printf("AAAA record created: %s -> %s\n", displayName, currentIPv6)
+			}
+		case aaaaRecord.Content != currentIPv6:
+			if err := updatePorkbunDNS(config, subdomain, currentIPv6, "AAAA"); err != nil {
+				updateErrs = append(updateErrs, fmt.Errorf("error updating IPv6 DDNS for %s. err=%w", displayName, err))
+			} else {
 				fmt.Printf("AAAA record updated: %s -> %s\n", displayName, currentIPv6)
 			}
+		default:
+			fmt.Printf("AAAA already up to date for %s: %s\n", displayName, currentIPv6)
 		}
 	}
-	return nil
+
+	return errors.Join(updateErrs...)
 }
